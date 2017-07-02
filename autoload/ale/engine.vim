@@ -194,6 +194,15 @@ function! s:HandleExit(job_id, exit_code) abort
 endfunction
 
 function! s:HandleLSPResponse(response) abort
+    let l:method = get(a:response, 'method', '')
+
+    if l:method ==# 'textDocument/publishDiagnostics'
+        let l:loclist = ale#lsp#response#ReadDiagnostics(a:response)
+        let l:filename = ale#path#FromURI(a:response.params.uri)
+    endif
+endfunction
+
+function! s:HandleTSServerResponse(response) abort
     let l:is_diag_response = get(a:response, 'type', '') ==# 'event'
     \   && get(a:response, 'event', '') ==# 'semanticDiag'
 
@@ -557,6 +566,60 @@ function! ale#engine#StopCurrentJobs(buffer, include_lint_file_jobs) abort
     let l:info.lsp_command_list = []
 endfunction
 
+function! s:HandleLSPResponse(response) abort
+
+endfunction
+
+function! s:CheckWithLSP(buffer, linter) abort
+    let l:command = ''
+    let l:address = ''
+
+    if a:linter.lsp ==# 'stdio'
+        let l:executable = ale#linter#GetExecutable(a:buffer, a:linter)
+
+        if !s:IsExecutable(l:executable)
+            return
+        endif
+
+        let l:command = ale#job#PrepareCommand(
+        \ ale#linter#GetCommand(a:buffer, a:linter),
+        \)
+        let l:id = ale#lsp#StartProgram(
+        \   l:executable,
+        \   l:command,
+        \   function('s:HandleLSPResponse'),
+        \)
+    else
+        let l:address = ale#linter#GetAddress(a:buffer, a:linter)
+        let l:id = ale#lsp#ConnectToAddress(
+        \   l:address,
+        \   function('s:HandleLSPResponse'),
+        \)
+    endif
+
+    if !l:id
+        if g:ale_history_enabled && !empty(l:command)
+            call ale#history#Add(a:buffer, 'failed', l:id, l:command)
+        endif
+
+        return
+    endif
+
+    " Init the project root if needed.
+    let l:root = ale#util#GetFunction(a:linter.project_root_callback)(a:buffer)
+    call ale#lsp#Send(l:id, ale#lsp#message#Initialize(l:root))
+
+    let l:language_id = ale#util#GetFunction(a:linter.language_callback)(a:buffer)
+
+    if ale#lsp#OpenDocumentIfNeeded(l:id, a:buffer, l:language_id)
+        if g:ale_history_enabled && !empty(l:command)
+            call ale#history#Add(a:buffer, 'started', l:id, l:command)
+        endif
+    else
+        call ale#lsp#Send(l:id, ale#lsp#message#DidChange(a:buffer))
+    endif
+endfunction
+
 function! s:CheckWithTSServer(buffer, linter, executable) abort
     let l:info = g:ale_buffer_info[a:buffer]
 
@@ -566,7 +629,7 @@ function! s:CheckWithTSServer(buffer, linter, executable) abort
     let l:id = ale#lsp#StartProgram(
     \   a:executable,
     \   l:command,
-    \   function('s:HandleLSPResponse'),
+    \   function('s:HandleTSServerResponse'),
     \)
 
     if !l:id
@@ -607,6 +670,8 @@ function! ale#engine#Invoke(buffer, linter) abort
                 call s:InvokeChain(a:buffer, a:linter, 0, [])
             endif
         endif
+    else
+        call s:CheckWithLSP(a:buffer, a:linter)
     endif
 endfunction
 
